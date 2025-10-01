@@ -1,78 +1,79 @@
+
 #!/usr/bin/env bash
-set -euo pipefail
+"${DEBUG:-:}" # no-op to allow set -u without failing in some shells
+set -u
 
-# A simple rofi script mode that uses `locate` to find files by name.
-# - On initial/incremental calls (ROFI_RETV=0) it reads ROFI_INPUT and prints
-#   matching file paths. The displayed text is the basename while the full
-#   path is stored in the 'info' field so we can open it on selection.
-# - When an entry is selected (ROFI_RETV=1) the script opens the file with
-#   xdg-open (or a sensible fallback) in the background and exits.
-
-null=$'\0'
-sep=$'\x1f'
+# Rofi script mode for locating files using `locate`.
+#
+# Behavior:
+# - Initial call (ROFI_RETV=0): print a short hint and set the prompt.
+# - Custom entry selected (ROFI_RETV=2): treat the typed text as a query,
+#   run `locate` and print matching paths as rows. Each row contains the
+#   actual path as the entry (used for filtering) but uses the `display`
+#   option to show a nicer string (basename — fullpath). The `info` field
+#   contains the full path and is used when opening the file.
+# - Entry selected (ROFI_RETV=1): open the path stored in ROFI_INFO (or
+#   the selected entry) with xdg-open in the background.
 
 ROFI_RETV=${ROFI_RETV:-0}
-QUERY=${ROFI_INPUT:-}
 
-open_target() {
-    target="$1"
-    # Ensure we have something to open
-    [ -n "$target" ] || return 0
+case "$ROFI_RETV" in
+	0)
+		# Initial call: set prompt and show a short hint. Allow custom entries
+		# (do not set no-custom=true) so the user can type a query and press Enter.
+		echo -en "\0prompt\x1fLocate: \n"
+		echo "Type a query and press Enter to search with locate"
+		exit 0
+		;;
 
-    # Prefer xdg-open, then gio, then mimeopen. Launch in background so rofi
-    # doesn't wait for the opener to finish.
-    if command -v xdg-open >/dev/null 2>&1; then
-        setsid xdg-open "$target" >/dev/null 2>&1 &
-    elif command -v gio >/dev/null 2>&1; then
-        setsid gio open "$target" >/dev/null 2>&1 &
-    elif command -v mimeopen >/dev/null 2>&1; then
-        setsid mimeopen -n "$target" >/dev/null 2>&1 &
-    else
-        # Last resort: try to open with $TERMINAL (if set) and an editor
-        if [ -n "${TERMINAL:-}" ] && command -v ${TERMINAL%% *} >/dev/null 2>&1; then
-            # open a terminal in the file's directory and open with $EDITOR or vi
-            editor=${EDITOR:-vi}
-            dir=$(dirname -- "$target")
-            base=$(basename -- "$target")
-            setsid ${TERMINAL%% *} -e sh -c "cd \"$dir\" && $editor \"$base\"" >/dev/null 2>&1 &
-        fi
-    fi
-}
+	2)
+		# Custom entry was entered (user typed a search and pressed Enter).
+		query="${1:-}"
+		# if query is empty, nothing to do
+		if [ -z "$query" ]; then
+			echo "No query provided"
+			exit 0
+		fi
 
-if [ "$ROFI_RETV" -eq 1 ] || [ "$#" -gt 0 ]; then
-    # Selection case. Prefer ROFI_INFO (set via 'info' row option). If not set
-    # fall back to the first script argument.
-    sel="${ROFI_INFO:-${1:-}}"
-    open_target "$sel"
-    exit 0
-fi
+		# Max number of results to show (tweakable)
+		MAX_RESULTS=200
 
-# Initial/incremental call: produce entries. Must always print at least one
-# non-empty row otherwise rofi will quit.
-if [ -z "$QUERY" ]; then
-    # Help row (nonselectable)
-    printf 'Type to search with locate%snonselectable%strue\n' "$null" "$sep"
-    exit 0
-fi
+		# Run locate. Use case-insensitive search (-i) and limit results (-n).
+		# Silence errors (database missing, permissions, etc.).
+		# Note: different locate implementations accept these flags (mlocate/updatedb).
+		mapfile -t results < <(locate -i -n "$MAX_RESULTS" "$query" 2>/dev/null || true)
 
-if ! command -v locate >/dev/null 2>&1; then
-    printf 'locate not found%snonselectable%strue\n' "$null" "$sep"
-    exit 0
-fi
+		if [ "${#results[@]}" -eq 0 ]; then
+			echo "No results for '$query'"
+			exit 0
+		fi
 
-# Run locate. Try a simple case-insensitive substring search. Fall back to
-# plain locate if the -i option isn't supported on some implementations.
-results=$(locate -i -- "$QUERY" 2>/dev/null || locate -- "$QUERY" 2>/dev/null || true)
+		for path in "${results[@]}"; do
+			# Print each result as: original_entry<\0>display\x1f<nice>\x1finfo\x1f<path>\n
+			# Use the full path as the original entry so filtering works on the full
+			# path. Use display to show a friendlier line (basename — fullpath).
+			base=$(basename -- "${path}")
+			display="$base — $path"
+			# printf handles special characters more robustly than echo
+			printf '%s\0display\x1f%s\x1finfo\x1f%s\n' "$path" "$display" "$path"
+		done
+		exit 0
+		;;
 
-if [ -z "$results" ]; then
-    printf 'No results for: %s%snonselectable%strue\n' "$QUERY" "$null" "$sep"
-    exit 0
-fi
+	1)
+		# A listed entry was selected. Try to open it with xdg-open.
+		target="${ROFI_INFO:-${1:-}}"
+		if [ -z "$target" ]; then
+			exit 0
+		fi
 
-# Remove duplicates and limit results to a reasonable number
-printf '%s\n' "$results" | awk '!seen[$0]++' | head -n 200 | while IFS= read -r path; do
-    # present the basename as the displayed string, keep full path in info
-    base=$(basename -- "$path")
-    # Format: entry<\0>display<US><display-string><US>info<US><info-value>\n
-    printf '%s\n' "${path}${null}display${sep}${base}${sep}info${sep}${path}"
-done
+		# Launch in background so rofi doesn't wait. Use setsid to detach.
+		setsid xdg-open -- "$target" >/dev/null 2>&1 &
+		exit 0
+		;;
+
+	*)
+		# Unhandled Rofi return value: just exit quietly.
+		exit 0
+		;;
+esac

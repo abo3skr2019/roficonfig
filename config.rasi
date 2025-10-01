@@ -55,9 +55,8 @@ element-text {
 
 configuration {
     font: "Noto Sans Mono 12pt";
-    modi: "drun,combi";
-    combi-modi: "drun"; // make a locate script and add it when i feel like it 
-
+    modes: "drun,combi";
+    combi-modes: "[drun,locater]";
     lines: 10;
     fixed-num-lines: true;
     padding: 10px;
